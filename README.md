@@ -1,5 +1,13 @@
 # attention-sink-profiler
 
+![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.13-EE4C2C?style=flat-square&logo=pytorch)
+![Transformers](https://img.shields.io/badge/Transformers-5.13-FFD21E?style=flat-square)
+![CUDA](https://img.shields.io/badge/CUDA-13.0-76B900?style=flat-square&logo=nvidia)
+![Platform](https://img.shields.io/badge/Platform-WSL%20%7C%20Linux-lightgrey?style=flat-square)
+![GPU](https://img.shields.io/badge/GPU-RTX%202070-76B900?style=flat-square&logo=nvidia)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+
 ## Overview
 
 Empirical measurement of the **attention sink** phenomenon in autoregressive
