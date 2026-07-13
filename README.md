@@ -1,53 +1,129 @@
 # attention-sink-profiler
 
+## Overview
+
 Empirical measurement of the **attention sink** phenomenon in autoregressive
-transformers — from attention map analysis to functional impact via masked-key ablation.
+transformers — from attention map analysis to functional impact via
+**masked-key ablation**.
 
-## What is attention sink?
-
-In autoregressive transformers, early tokens in the sequence (especially position 0)
-receive disproportionately high attention scores regardless of their semantic content.
-First documented in *Efficient Streaming Language Models with Attention Sinks*
-(Xiao et al., 2023), this phenomenon has direct implications for KV-cache eviction,
-streaming inference, and memory management in LLM serving systems.
-
-This project measures it empirically on real model weights running on GPU.
+This project studies how early tokens in a sequence absorb disproportionate
+attention mass, how that effect changes with depth and sequence length, and
+whether those sink tokens matter functionally for prediction quality.
 
 ---
 
-## Models and hardware
+## What is Attention Sink?
+
+Attention sink is the tendency of autoregressive transformers to assign
+disproportionately high attention mass to the earliest tokens in a sequence,
+often independent of semantic content.
+
+This phenomenon matters for:
+
+- **KV-cache eviction**
+- **streaming inference**
+- **memory-efficient decoding**
+- **attention interpretability**
+
+Reference:
+- Xiao et al., *Efficient Streaming Language Models with Attention Sinks* (2023)
+
+---
+
+## Models and Hardware
+
+### Models
 
 | Model | Params | Layers | Heads | Sequence lengths |
-|---|---|---|---|---|
+|---|---:|---:|---:|---|
 | gpt2 | 117M | 12 | 12 | 64, 128, 256, 512, 768, 1024 |
 | gpt2-medium | 345M | 24 | 16 | 64, 128, 256, 512 |
 
-**Hardware:** NVIDIA RTX 2070 (8.6 GB VRAM)
-**Stack:** PyTorch 2.13, Transformers 5.13, Python 3.14
+### Hardware
+
+- **GPU:** NVIDIA RTX 2070
+- **VRAM:** 8.6 GB
+- **Framework:** PyTorch 2.13
+- **Library:** Transformers 5.13
+- **Python:** 3.14
 
 ---
 
-## Key findings
+## Research Questions
 
-### Finding 1 — Sink is structural, not semantic
+1. Is attention sink semantic or structural?
+2. How does sink strength change with depth?
+3. How does sink strength scale with sequence length?
+4. Do larger models behave differently?
+5. Are sink tokens functionally important?
 
-Tested natural text vs random tokens vs repeated tokens as input.
+---
+
+## Methodology
+
+### Main Profiling
+
+For each `(model, seq_len)` pair, the pipeline:
+
+1. builds a sequence of target length
+2. runs a forward pass with `output_attentions=True`
+3. extracts attention matrices for all layers and heads
+4. computes sink metrics on the final query positions
+
+### Core Metrics
+
+- **sink_share_first_1 / 4 / 8**  
+  Fraction of attention mass assigned to the first 1, 4, or 8 tokens.
+
+- **boost_first_1 / 4 / 8**  
+  Observed sink share divided by the expected uniform baseline.
+
+- **peak_key_pos**  
+  Position receiving the highest attention mass.
+
+- **top1_first4_query_frac / top1_first8_query_frac**  
+  Fraction of tail queries whose most-attended key lies in the first 4 or 8 tokens.
+
+### Tail Window
+
+Metrics are computed over the last `tail_window` query positions
+(default: 64) to avoid trivial early-position effects from the causal mask.
+
+---
+
+## Experiments
+
+### 1. Input Type Ablation
+
+#### Goal
+Test whether sink depends on semantic content.
+
+#### Inputs
+- natural text
+- random tokens
+- repeated token
+
+#### Result
 
 | Input type | Mean sink_first_1 | Mean sink_first_4 |
-|---|---|---|
+|---|---:|---:|
 | natural | 0.355 | 0.359 |
 | **random** | **0.437** | **0.441** |
 | repeated | 0.409 | 0.414 |
 
-Random tokens produce the strongest sink. The phenomenon is positional/structural —
-the model uses early positions as an attention mass dump regardless of token content.
+#### Interpretation
+Random tokens produce the strongest sink.
 
-### Finding 2 — Sink grows with depth and context length
+This suggests the phenomenon is **structural/positional**, not semantic.
 
-GPT-2 mean boost over uniform baseline for first 4 tokens:
+---
+
+### 2. Main Attention Sink Sweep
+
+#### GPT-2: boost over uniform for first 4 tokens
 
 | seq_len | boost_first_4 |
-|---|---|
+|---|---:|
 | 64 | 2.4× |
 | 128 | 9.9× |
 | 256 | 22.6× |
@@ -55,58 +131,97 @@ GPT-2 mean boost over uniform baseline for first 4 tokens:
 | 768 | 67.9× |
 | 1024 | **82.2×** |
 
-Individual heads at seq=1024 reach **boost > 200×** with 90% of attention mass
-concentrated on the first 4 tokens.
+#### Interpretation
+Sink strength grows strongly with sequence length.
 
-By layer depth (GPT-2, seq=1024):
+At long context, the first 4 tokens absorb vastly more attention than a uniform
+baseline would predict.
+
+---
+
+### 3. Layer Depth Analysis
+
+#### GPT-2 at seq_len = 1024
 
 | Layer | boost_first_4 |
-|---|---|
+|---|---:|
 | 0 | 0.15× |
 | 2 | 18.6× |
-| 5 | **118.2×** |
-| 7 | **132.7×** |
-| 9 | **130.1×** |
-| 11 | **119.9×** |
+| 5 | 118.2× |
+| 7 | 132.7× |
+| 9 | 130.1× |
+| 11 | 119.9× |
 
-Nearly absent in early layers, dominant in mid-to-late layers.
+#### Interpretation
+The sink is nearly absent in early layers and becomes dominant in
+mid-to-late layers.
 
-### Finding 3 — Larger models dilute the sink
+---
 
-| Model | seq=512 sink_share_first_4 | boost_first_4 |
-|---|---|---|
+### 4. GPT-2 vs GPT-2 Medium
+
+#### At seq_len = 512
+
+| Model | sink_share_first_4 | boost_first_4 |
+|---|---:|---:|
 | gpt2 | 0.382 | 45.8× |
 | gpt2-medium | **0.199** | **23.8×** |
 
-GPT-2-medium distributes attention more broadly at longer contexts.
-The sink phenomenon dilutes with model scale.
+#### Interpretation
+The larger model spreads attention more broadly.
 
-### Finding 4 — Per-head classification
+Sink is still present, but less concentrated.
 
-At seq=512, GPT-2 heads classified by attention pattern:
+---
+
+### 5. Per-Head Classification
+
+#### Head Types
 
 | Head type | Count | Fraction |
-|---|---|---|
+|---|---:|---:|
 | strong_sink | 46 | 32% |
 | moderate_sink | 40 | 28% |
 | distributed | 32 | 22% |
 | recency | 14 | 10% |
 | mixed | 12 | 8% |
 
-60% of all heads (86/144) are sink heads. The effect concentrates in deeper layers:
-- Layers 0–1: 0 strong sink heads
-- Layer 8: **9/12** strong sink
-- Layer 9: **8/12** strong sink
+#### Interpretation
+About **60% of GPT-2 heads** are sink-oriented (`strong_sink` or `moderate_sink`).
 
-### Finding 5 — Functional impact via masked-key ablation
+The effect is concentrated in deeper layers:
+- layers 0–1: no strong sink heads
+- layer 8: **9 / 12** strong sink heads
+- layer 9: **8 / 12** strong sink heads
 
-The most rigorous experiment: mask specific key positions in the attention
-computation while keeping the full sequence and correct positional embeddings.
+---
 
-**Tail perplexity ratio** (higher = more degradation) at seq=1024:
+### 6. Masked-Key Ablation
+
+#### Goal
+Measure the **functional impact** of sink tokens.
+
+#### Why this experiment matters
+Naive token removal creates positional artifacts in GPT-2 because it uses
+**absolute positional embeddings**.
+
+Instead, this experiment:
+
+- keeps the full sequence
+- keeps normal positional structure
+- blocks attention to selected key positions
+- measures degradation in tail prediction quality
+
+#### Mask types
+- `first_1`, `first_4`, `first_8`
+- `middle_4`, `middle_8`
+- `recent_4`, `recent_8`
+- `random_4`, `random_8`
+
+#### Key result at seq_len = 1024
 
 | Masked region | Size | PPL ratio | Top-5 overlap |
-|---|---|---|---|
+|---|---:|---:|---:|
 | recent_4 | 4 | **1.868** | 100% |
 | recent_8 | 8 | **1.311** | 100% |
 | **first_8** | 8 | **1.075** | **40%** |
@@ -117,53 +232,40 @@ computation while keeping the full sequence and correct positional embeddings.
 | middle_4 | 4 | 1.000 | 100% |
 | random_8_mean | 8 | 1.000 | 93% |
 
-**Interpretation:**
+#### Interpretation
 
-1. **Recent tokens are the strongest functional dependency** for immediate next-token
-   prediction — masking the last 4 tokens before the evaluation window causes 87%
-   perplexity increase.
+- **Recent tokens are the strongest functional dependency** for immediate next-token prediction.
+- **Sink tokens still matter more than middle or random tokens**.
+- **Sink masking strongly perturbs output ranking**, even when average tail loss changes modestly.
 
-2. **Sink tokens (first 8) matter more than middle or random tokens** — masking
-   first_8 degrades perplexity by 7.5%, while middle_8 causes only 0.5%.
-
-3. **Sink tokens strongly perturb the output distribution** — top-5 overlap drops
-   to 40% when first tokens are masked, while middle/random masks maintain 93–100%.
-   This means sink tokens have a directed, discrete impact on which tokens the model
-   considers most likely, even when average tail loss changes modestly.
-
-**Conclusion:** attention sink tokens are not just visually salient in attention maps —
-they are functionally important. However, their importance is qualitatively different
-from recency: they affect output *distribution shape* more than average *loss magnitude*.
+#### Conclusion
+Sink tokens are not just visually salient in attention maps — they are
+**functionally important**, especially for output distribution shape.
 
 ---
 
-## Experiments
+## Main Findings
 
-| # | Experiment | Script | Key output |
-|---|---|---|---|
-| Main | Attention map profiling | profile_attention_sink.py | attention_sink_summary.csv |
-| 1 | Natural vs random vs repeated | advanced_experiments.py | experiment1_input_types.csv |
-| 3 | Per-head sink classification | advanced_experiments.py | experiment3_head_classification.csv |
-| 2g | Masked-key ablation | experiment2g_masked_key_ablation.py | experiment2g_masked_key_ablation.csv |
-
-Experiments 2c–2f explored KV eviction via input truncation and positional remapping.
-These were informative but architecturally limited: GPT-2 uses absolute positional
-embeddings, which makes sparse-context retention unstable. Experiment 2g (masked-key
-ablation) provides the correct functional measurement by keeping the full sequence
-and positions intact while blocking attention to specific keys.
+1. Attention sink is **structural**, not semantic.
+2. Sink grows with **layer depth**.
+3. Sink becomes more extreme as **sequence length increases**.
+4. Larger models like GPT-2 medium show a **weaker, more distributed sink**.
+5. Sink tokens have measurable **functional impact**, but **recent tokens remain the strongest dependency** for immediate next-token prediction.
 
 ---
 
-## Results files
+## Results Files
 
-| File | Rows | Description |
-|---|---|---|
-| attention_sink_summary.csv | 2400 | Per-layer, per-head sink metrics (both models) |
-| attention_sink_positions.csv | 56064 | Per-position attention mass by layer |
-| experiment1_input_types.csv | 9 | Natural vs random vs repeated |
-| experiment3_head_classification.csv | 144 | Head-level classification |
-| experiment2g_masked_key_ablation.csv | ~48 | Per-mask tail PPL and KL divergence |
-| experiment2g_masked_key_ablation_agg.csv | ~30 | Aggregated with random trial means |
+| File | Description |
+|---|---|
+| `results/attention_sink_summary.csv` | Per-layer, per-head sink metrics |
+| `results/attention_sink_positions.csv` | Per-position attention mass by layer |
+| `results/experiment1_input_types.csv` | Natural vs random vs repeated |
+| `results/experiment3_head_classification.csv` | Head-level classification |
+| `results/experiment2g_masked_key_ablation.csv` | Functional masked-key ablation |
+| `results/experiment2g_masked_key_ablation_agg.csv` | Aggregated random-trial results |
+| `results/run_log.csv` | Timing and run status |
+| `results/metadata.json` | Configuration metadata |
 
 ---
 
@@ -171,42 +273,93 @@ and positions intact while blocking attention to specific keys.
 
 | File | Description |
 |---|---|
-| gpt2_sink_share_first4_by_layer.png | Sink share across layers |
-| gpt2_boost_first4_by_layer.png | Boost over uniform by layer |
-| gpt2_heatmap_seq*.png | Attention received heatmaps |
-| gpt2-medium_*.png | Same plots for GPT-2-medium |
-| model_comparison_by_layer.png | GPT-2 vs GPT-2-medium by depth |
-| exp1_input_types.png | Natural vs random vs repeated |
-| exp3_head_classification.png | Head type distribution + heatmap |
-| exp2g_ppl_ratio.png | Masked-key PPL ratio |
-| exp2g_grouped_ppl_ratio.png | Grouped comparison: sink vs middle vs recent |
+| `plots/gpt2_sink_share_first4_by_layer.png` | Sink share across layers |
+| `plots/gpt2_boost_first4_by_layer.png` | Boost over uniform by layer |
+| `plots/gpt2_heatmap_seq*.png` | Attention-received heatmaps |
+| `plots/gpt2-medium_*.png` | Same plots for GPT-2 medium |
+| `plots/model_comparison_by_layer.png` | GPT-2 vs GPT-2 medium |
+| `plots/exp1_input_types.png` | Input type ablation |
+| `plots/exp3_head_classification.png` | Head type distribution |
+| `plots/exp2g_ppl_ratio.png` | PPL ratio under masked-key ablation |
+| `plots/exp2g_grouped_ppl_ratio.png` | Sink vs middle vs recent vs random |
 
 ---
 
-## Run
+## Repository Structure
 
-    python3 -m venv venv && source venv/bin/activate
-    pip install -r requirements.txt
+~~~text
+attention-sink-profiler/
+├── profile_attention_sink.py
+├── plot_attention_sink.py
+├── advanced_experiments.py
+├── experiment2g_masked_key_ablation.py
+├── README.md
+├── DESIGN.md
+├── LICENSE
+├── requirements.txt
+├── results/
+└── plots/
+~~~
 
-    # Main attention map profiling
-    python3 profile_attention_sink.py \
-        --models gpt2 --seq-lens 64 128 256 512 768 1024
-    python3 profile_attention_sink.py \
-        --models gpt2-medium --seq-lens 64 128 256 512
+---
 
-    # Generate plots
-    python3 plot_attention_sink.py
+## How to Run
 
-    # Advanced experiments (input types, head classification)
-    python3 advanced_experiments.py
+### 1. Create environment
 
-    # Masked-key ablation (functional impact)
-    python3 experiment2g_masked_key_ablation.py
+~~~bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+~~~
+
+### 2. Run main attention profiling
+
+~~~bash
+python3 profile_attention_sink.py --models gpt2 --seq-lens 64 128 256 512 768 1024
+python3 profile_attention_sink.py --models gpt2-medium --seq-lens 64 128 256 512
+~~~
+
+### 3. Generate plots
+
+~~~bash
+python3 plot_attention_sink.py
+~~~
+
+### 4. Run advanced experiments
+
+~~~bash
+python3 advanced_experiments.py
+~~~
+
+### 5. Run masked-key ablation
+
+~~~bash
+python3 experiment2g_masked_key_ablation.py
+~~~
+
+---
+
+## Limitations
+
+### GPT-2 uses absolute positional embeddings
+This makes direct simulation of KV eviction tricky: removing tokens can create
+positional artifacts not representative of modern RoPE-based models.
+
+### Masked-key ablation is the cleanest functional test here
+It avoids sparse-position artifacts by keeping the full sequence intact and
+only blocking access to selected keys.
+
+### Results may differ on modern architectures
+A RoPE-based model such as LLaMA or Mistral could show different streaming/eviction behavior.
 
 ---
 
 ## References
 
-- Xiao et al., "Efficient Streaming Language Models with Attention Sinks" (2023)
-  — https://arxiv.org/abs/2309.17453
-- Radford et al., "Language Models are Unsupervised Multitask Learners" (2019) — GPT-2
+- Xiao et al., **Efficient Streaming Language Models with Attention Sinks** (2023)  
+  https://arxiv.org/abs/2309.17453
+
+- Radford et al., **Language Models are Unsupervised Multitask Learners** (2019)  
+  GPT-2 technical report
+
