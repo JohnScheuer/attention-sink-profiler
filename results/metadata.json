@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-07-13T07:53:12.230742Z",
+  "device": "cuda",
+  "cuda_available": true,
+  "gpu_name": "NVIDIA GeForce RTX 2070",
+  "models": [
+    "gpt2"
+  ],
+  "seq_lens": [
+    64,
+    128,
+    256,
+    512,
+    768,
+    1024
+  ],
+  "tail_window": 64
+}
